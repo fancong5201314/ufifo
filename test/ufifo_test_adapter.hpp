@@ -90,11 +90,21 @@ class UfifoTestAdapter {
     virtual ~UfifoTestAdapter()
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (size_t i = handles_.size(); i > 0; --i) {
-            if (handles_[i - 1]) {
-                ufifo_destroy(handles_[i - 1]);
-            } else {
-                ufifo_close(handles_[i - 1]);
+        size_t valid_count = 0;
+        for (size_t i = 0; i < handles_.size(); i++) {
+            if (handles_[i]) {
+                valid_count++;
+            }
+        }
+
+        for (size_t i = 0; i < handles_.size(); i++) {
+            if (handles_[i]) {
+                if (valid_count == 1) {
+                    ufifo_destroy(handles_[i]);
+                } else {
+                    ufifo_close(handles_[i]);
+                }
+                valid_count--;
             }
         }
         handles_.clear();
