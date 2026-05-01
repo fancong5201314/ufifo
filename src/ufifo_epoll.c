@@ -1,5 +1,6 @@
 #include "ufifo_internal.h"
 #include <errno.h>
+#include <stdint.h>
 
 #include "utils.h"
 

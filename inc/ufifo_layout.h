@@ -21,6 +21,7 @@ typedef struct {
 
     unsigned int in;
     unsigned int mask;
+    unsigned int cached_min_out; /* O(1) cache for SHARED mode */
 
     ufifo_lock_e lock;
     pthread_mutex_t ctrl_mutex; /* always active: protects control data */

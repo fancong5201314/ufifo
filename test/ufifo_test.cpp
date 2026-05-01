@@ -1432,9 +1432,9 @@ TEST_F(UfifoReapTest, ReapDeadUserOnRegister)
         attach_init.opt = UFIFO_OPT_ATTACH;
         ufifo_t *fifo_child = nullptr;
         if (ufifo_open(name.c_str(), &attach_init, &fifo_child) == 0) {
-            exit(0);
+            _exit(0);
         }
-        exit(1);
+        _exit(1);
     }
 
     int status;
@@ -1475,10 +1475,10 @@ TEST_F(UfifoReapTest, ReapDeadUserOnPut)
         if (ufifo_open(name.c_str(), &attach_init, &reader) == 0) {
             char b;
             if (ufifo_get_block(reader, &b, 1) == 1) {
-                exit(0);
+                _exit(0);
             }
         }
-        exit(1);
+        _exit(1);
     }
 
     // Give some time for child to start

@@ -92,11 +92,9 @@ class UfifoTestAdapter {
         std::lock_guard<std::mutex> lock(mutex_);
         for (size_t i = handles_.size(); i > 0; --i) {
             if (handles_[i - 1]) {
-                if (i - 1 == 0) {
-                    ufifo_destroy(handles_[i - 1]);
-                } else {
-                    ufifo_close(handles_[i - 1]);
-                }
+                ufifo_destroy(handles_[i - 1]);
+            } else {
+                ufifo_close(handles_[i - 1]);
             }
         }
         handles_.clear();
@@ -135,17 +133,23 @@ class UfifoTestAdapter {
 
     int Detach(ufifo_t *handle)
     {
+        bool is_last = true;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (size_t i = 0; i < handles_.size(); i++) {
                 if (handles_[i] == handle) {
                     handles_[i] = nullptr;
-                    break;
+                } else if (handles_[i] != nullptr) {
+                    is_last = false;
                 }
             }
         }
 
-        return ufifo_close(handle);
+        if (is_last) {
+            return ufifo_destroy(handle);
+        } else {
+            return ufifo_close(handle);
+        }
     }
 
     int Attach(ufifo_t **handle)

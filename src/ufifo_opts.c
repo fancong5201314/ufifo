@@ -3,24 +3,9 @@
 
 #include "utils.h"
 
-/*
- * Unified notification: post to eventfd only when someone is listening.
- * - rx_waiters > 0: a thread is blocked in poll(), always post.
- * - epoll_armed == 1: an epoll listener is registered.
- *   Use atomic_exchange to flip 1→0 so only ONE producer posts per arm cycle.
- */
-static inline void __ufifo_notify_efd(int efd, int *waiters, int *epoll_armed)
-{
-    if (smp_load_acquire(waiters) > 0) {
-        __ufifo_efd_post(efd);
-    } else if (atomic_xchg(epoll_armed, 0)) {
-        __ufifo_efd_post(efd);
-    }
-}
-
 static unsigned int __ufifo_min_out(ufifo_t *handle)
 {
-    unsigned int in_val = READ_ONCE(handle->kfifo.in);
+    unsigned int in_val = smp_load_acquire(handle->kfifo.in);
     unsigned int max_distance = 0;
     unsigned int min_out = in_val;
     unsigned int i;
@@ -28,9 +13,9 @@ static unsigned int __ufifo_min_out(ufifo_t *handle)
     for (i = 0; i < handle->ctrl->max_users; i++) {
         if (smp_load_acquire(&handle->ctrl->users[i].active)) {
             unsigned int u_out = smp_load_acquire(&handle->ctrl->users[i].out);
-            unsigned int distance = in_val - u_out;
-            if (distance > max_distance) {
-                max_distance = distance;
+            int distance = (int)(in_val - u_out);
+            if (distance > (int)max_distance) {
+                max_distance = (unsigned int)distance;
                 min_out = u_out;
             }
         }
@@ -39,13 +24,25 @@ static unsigned int __ufifo_min_out(ufifo_t *handle)
     return min_out;
 }
 
+void __ufifo_update_cached_min_out(ufifo_t *handle)
+{
+    unsigned int min_o = __ufifo_min_out(handle);
+    unsigned int cur_cached = smp_load_acquire(&handle->ctrl->cached_min_out);
+
+    while ((int)(min_o - cur_cached) > 0) {
+        if (atomic_cmpxchg(&handle->ctrl->cached_min_out, &cur_cached, min_o)) {
+            break;
+        }
+    }
+}
+
 static unsigned int __ufifo_unused_len(ufifo_t *handle)
 {
     unsigned int out;
     unsigned int len;
 
     if (__ufifo_is_shared(handle)) {
-        out = __ufifo_min_out(handle);
+        out = smp_load_acquire(&handle->ctrl->cached_min_out);
     } else {
         out = smp_load_acquire(handle->kfifo.out);
     }
@@ -54,15 +51,13 @@ static unsigned int __ufifo_unused_len(ufifo_t *handle)
     return *handle->kfifo.mask + 1 - len;
 }
 
-static unsigned int __ufifo_peek_len(ufifo_t *handle, unsigned int offset)
+static unsigned int __ufifo_peek_len(ufifo_t *handle, unsigned int offset, unsigned int in_val)
 {
-    unsigned int len = smp_load_acquire(handle->kfifo.in) == offset ? 0 : 1;
-
+    unsigned int len = in_val == offset ? 0 : 1;
     if (len && handle->hook.recsize) {
         offset &= *handle->kfifo.mask;
         len = handle->hook.recsize(handle->shm_mem + offset, *handle->kfifo.mask - offset + 1, handle->shm_mem);
     }
-
     return len;
 }
 
@@ -91,6 +86,9 @@ void ufifo_reset(ufifo_t *handle)
     __ufifo_data_lock(handle);
     WRITE_ONCE(handle->kfifo.in, 0);
     WRITE_ONCE(handle->kfifo.out, 0);
+    if (__ufifo_is_shared(handle)) {
+        WRITE_ONCE(&handle->ctrl->cached_min_out, 0);
+    }
     __ufifo_data_unlock(handle);
 }
 
@@ -112,7 +110,14 @@ void ufifo_skip(ufifo_t *handle)
 
     __ufifo_data_lock(handle);
     unsigned int out = READ_ONCE(handle->kfifo.out);
-    smp_store_release(handle->kfifo.out, out + __ufifo_peek_len(handle, out));
+    unsigned int new_out = out + __ufifo_peek_len(handle, out, READ_ONCE(handle->kfifo.in));
+    smp_store_release(handle->kfifo.out, new_out);
+    if (__ufifo_is_shared(handle)) {
+        if (out == smp_load_acquire(&handle->ctrl->cached_min_out)) {
+            __ufifo_update_cached_min_out(handle);
+        }
+    }
+    __ufifo_efd_notify(handle->efd_wr, &handle->ctrl->tx_waiters, &handle->ctrl->epoll_tx_armed);
     __ufifo_data_unlock(handle);
 }
 
@@ -122,7 +127,7 @@ unsigned int ufifo_peek_len(ufifo_t *handle)
     UFIFO_CHECK_HANDLE(handle, 0);
 
     __ufifo_data_lock(handle);
-    len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out));
+    len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out), READ_ONCE(handle->kfifo.in));
     __ufifo_data_unlock(handle);
 
     return len;
@@ -148,6 +153,10 @@ static int __ufifo_try_reap_dead_readers(ufifo_t *handle)
         }
     }
 
+    if (cleaned) {
+        __ufifo_update_cached_min_out(handle);
+    }
+
     return cleaned;
 }
 
@@ -159,28 +168,29 @@ static unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, l
     __ufifo_data_lock(handle);
     while (1) {
         len = __ufifo_unused_len(handle);
-        if (len < size) {
-            /* Slow path: Check if space is constrained by dead shared readers */
-            if (__ufifo_is_shared(handle)) {
-                if (__ufifo_try_reap_dead_readers(handle)) {
-                    continue; /* Re-evaluate len */
-                }
-            }
+        if (len >= size) break;
 
-            if (millisec == 0) {
-                ret = -1;
-            } else if (millisec == -1) {
-                ret = __ufifo_efd_wait(handle->efd_wr, handle, &handle->ctrl->tx_waiters);
-            } else {
-                ret = __ufifo_efd_timedwait(handle->efd_wr, handle, millisec, &handle->ctrl->tx_waiters);
-                millisec = 0;
+        /* Slow path: Check if space is constrained by dead shared readers or stale cache */
+        if (__ufifo_is_shared(handle)) {
+            __ufifo_update_cached_min_out(handle);
+            if (__ufifo_try_reap_dead_readers(handle)) {
+                continue; /* Re-evaluate len after reaping */
             }
-            if (ret) {
-                len = 0;
-                goto end;
-            }
+            len = __ufifo_unused_len(handle);
+            if (len >= size) break;
+        }
+
+        if (millisec == 0) {
+            ret = -1;
+        } else if (millisec == -1) {
+            ret = __ufifo_efd_wait(handle->efd_wr, handle, &handle->ctrl->tx_waiters);
         } else {
-            break;
+            ret = __ufifo_efd_timedwait(handle->efd_wr, handle, millisec, &handle->ctrl->tx_waiters);
+            millisec = 0;
+        }
+        if (ret) {
+            len = 0;
+            goto end;
         }
     }
     if (handle->hook.recput) {
@@ -200,12 +210,12 @@ static unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, l
         unsigned int i;
         for (i = 0; i < handle->ctrl->max_users; i++) {
             if (READ_ONCE(&handle->ctrl->users[i].active))
-                __ufifo_notify_efd(handle->efd_rd_all[i],
+                __ufifo_efd_notify(handle->efd_rd_all[i],
                                    &handle->ctrl->users[i].rx_waiters,
                                    &handle->ctrl->users[i].epoll_armed);
         }
     } else {
-        __ufifo_notify_efd(handle->efd_rd_all[0],
+        __ufifo_efd_notify(handle->efd_rd_all[0],
                            &handle->ctrl->users[0].rx_waiters,
                            &handle->ctrl->users[0].epoll_armed);
     }
@@ -241,7 +251,7 @@ static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, l
 
     __ufifo_data_lock(handle);
     while (1) {
-        len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out));
+        len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out), READ_ONCE(handle->kfifo.in));
         if (len == 0) {
             if (millisec == 0) {
                 ret = -1;
@@ -259,8 +269,9 @@ static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, l
         }
     }
 
+    unsigned int old_out = READ_ONCE(handle->kfifo.out);
     if (handle->hook.recget) {
-        unsigned int out = READ_ONCE(handle->kfifo.out);
+        unsigned int out = old_out;
         len = *handle->kfifo.mask & out;
         len = handle->hook.recget(handle->shm_mem + len, *handle->kfifo.mask - len + 1, handle->shm_mem, buf);
         smp_store_release(handle->kfifo.out, out + len);
@@ -269,7 +280,13 @@ static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, l
         len = kfifo_out(&handle->kfifo, handle->shm_mem, buf, size);
     }
 
-    __ufifo_notify_efd(handle->efd_wr,
+    if (__ufifo_is_shared(handle)) {
+        if (old_out == smp_load_acquire(&handle->ctrl->cached_min_out)) {
+            __ufifo_update_cached_min_out(handle);
+        }
+    }
+
+    __ufifo_efd_notify(handle->efd_wr,
                        &handle->ctrl->tx_waiters,
                        &handle->ctrl->epoll_tx_armed);
 
@@ -304,7 +321,7 @@ static unsigned int __ufifo_peek(ufifo_t *handle, void *buf, unsigned int size, 
 
     __ufifo_data_lock(handle);
     while (1) {
-        len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out));
+        len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out), READ_ONCE(handle->kfifo.in));
         if (len == 0) {
             if (millisec == 0) {
                 ret = -1;
@@ -331,7 +348,7 @@ static unsigned int __ufifo_peek(ufifo_t *handle, void *buf, unsigned int size, 
         len = kfifo_out_peek(&handle->kfifo, handle->shm_mem, buf, size);
     }
 
-    __ufifo_notify_efd(handle->efd_wr,
+    __ufifo_efd_notify(handle->efd_wr,
                        &handle->ctrl->tx_waiters,
                        &handle->ctrl->epoll_tx_armed);
 end:
@@ -366,19 +383,26 @@ int ufifo_oldest(ufifo_t *handle, unsigned int tag)
 
     __ufifo_data_lock(handle);
     tmp = READ_ONCE(handle->kfifo.out);
-    while (1) {
-        len = __ufifo_peek_len(handle, tmp);
-        if (!len) {
-            ret = -ESPIPE;
-            break;
-        }
+    unsigned int in_val = READ_ONCE(handle->kfifo.in);
+    while (tmp != in_val) {
+        len = __ufifo_peek_len(handle, tmp, in_val);
+        if (len == 0) break;
         if (__ufifo_peek_tag(handle, tmp) == tag) {
             ret = 0;
-            break;
+            goto found;
         }
         tmp += len;
     }
+    ret = -ESPIPE;
+found:
+    unsigned int old_out = READ_ONCE(handle->kfifo.out);
     smp_store_release(handle->kfifo.out, tmp);
+    if (__ufifo_is_shared(handle)) {
+        if (old_out == smp_load_acquire(&handle->ctrl->cached_min_out)) {
+            __ufifo_update_cached_min_out(handle);
+        }
+    }
+    __ufifo_efd_notify(handle->efd_wr, &handle->ctrl->tx_waiters, &handle->ctrl->epoll_tx_armed);
     __ufifo_data_unlock(handle);
 
     return ret;
@@ -394,20 +418,30 @@ int ufifo_newest(ufifo_t *handle, unsigned int tag)
 
     __ufifo_data_lock(handle);
     tmp = READ_ONCE(handle->kfifo.out);
-    while (1) {
-        len = __ufifo_peek_len(handle, tmp);
-        if (!len) {
-            tmp = found ? final : tmp;
-            ret = found ? 0 : -ESPIPE;
-            break;
-        }
+    unsigned int in_val = READ_ONCE(handle->kfifo.in);
+    while (tmp != in_val) {
+        len = __ufifo_peek_len(handle, tmp, in_val);
+        if (len == 0) break;
         if (__ufifo_peek_tag(handle, tmp) == tag) {
             found = true;
             final = tmp;
         }
         tmp += len;
     }
+    if (found) {
+        tmp = final;
+        ret = 0;
+    } else {
+        ret = -ESPIPE;
+    }
+    unsigned int old_out = READ_ONCE(handle->kfifo.out);
     smp_store_release(handle->kfifo.out, tmp);
+    if (__ufifo_is_shared(handle)) {
+        if (old_out == smp_load_acquire(&handle->ctrl->cached_min_out)) {
+            __ufifo_update_cached_min_out(handle);
+        }
+    }
+    __ufifo_efd_notify(handle->efd_wr, &handle->ctrl->tx_waiters, &handle->ctrl->epoll_tx_armed);
     __ufifo_data_unlock(handle);
 
     return ret;

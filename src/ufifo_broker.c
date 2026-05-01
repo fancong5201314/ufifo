@@ -422,3 +422,18 @@ void __ufifo_efd_close_all(ufifo_t *handle)
     }
     handle->efd_rd = -1;
 }
+
+void __ufifo_broker_wake_to_exit(const char *name)
+{
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return;
+
+    struct sockaddr_un addr;
+    socklen_t addr_len = __ufifo_broker_addr(name, &addr);
+
+    /* connect just to wake up accept() in the daemon */
+    connect(s, (struct sockaddr *)&addr, addr_len);
+    /* fix: wait for the daemon to exit */
+    usleep(1000);
+    close(s);
+}

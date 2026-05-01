@@ -136,10 +136,11 @@ int __ufifo_efd_wait(int efd, ufifo_t *handle, int *waiters)
     struct pollfd pfd = { .fd = efd, .events = POLLIN };
     ret = poll(&pfd, 1, -1); /* infinite wait */
     if (ret > 0) {
-        if (read(efd, &val, sizeof(val)) < 0)
-            ret = -errno;
-        else
+        if (read(efd, &val, sizeof(val)) < 0) {
+            ret = errno == EAGAIN ? 0 : -errno;
+        } else {
             ret = 0;
+        }
     } else {
         ret = -errno;
     }
@@ -160,10 +161,11 @@ int __ufifo_efd_timedwait(int efd, ufifo_t *handle, long millisec, int *waiters)
     struct pollfd pfd = { .fd = efd, .events = POLLIN };
     ret = poll(&pfd, 1, (int)millisec);
     if (ret > 0) {
-        if (read(efd, &val, sizeof(val)) < 0)
-            ret = -errno;
-        else
+        if (read(efd, &val, sizeof(val)) < 0) {
+            ret = errno == EAGAIN ? 0 : -errno;
+        } else {
             ret = 0;
+        }
     } else if (ret == 0) {
         ret = ETIMEDOUT;
     } else {
@@ -188,4 +190,16 @@ int __ufifo_efd_drain(int efd)
     while (read(efd, &val, sizeof(val)) > 0) {
     }
     return 0;
+}
+
+int __ufifo_efd_notify(int efd, int *waiters, int *epoll_armed)
+{
+    int ret = 0;
+    int w = smp_load_acquire(waiters);
+    int armed = atomic_xchg(epoll_armed, 0);
+    uint64_t post_count = (w > 0 ? w : 0) + armed;
+    if (post_count > 0) {
+        ret = write(efd, &post_count, sizeof(post_count));
+    }
+    return ret < 0 ? -errno : 0;
 }

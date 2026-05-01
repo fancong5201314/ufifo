@@ -60,10 +60,12 @@ int __ufifo_efd_wait(int efd, ufifo_t *handle, int *waiters);
 int __ufifo_efd_timedwait(int efd, ufifo_t *handle, long millisec, int *waiters);
 int __ufifo_efd_post(int efd);
 int __ufifo_efd_drain(int efd);
+int __ufifo_efd_notify(int efd, int *waiters, int *epoll_armed);
 
 /* ufifo_broker.c — eventfd lifecycle (fork-based broker daemon) */
 int __ufifo_acquire_eventfds(ufifo_t *handle, int is_alloc);
 int __ufifo_broker_start(ufifo_t *handle);
+void __ufifo_broker_wake_to_exit(const char *name);
 int __ufifo_efd_create_all(ufifo_t *handle, unsigned int max_users);
 void __ufifo_efd_close_all(ufifo_t *handle);
 
@@ -71,5 +73,8 @@ void __ufifo_efd_close_all(ufifo_t *handle);
 void __ufifo_reap_dead_user(ufifo_t *handle, unsigned int user_id);
 int __ufifo_is_shared(ufifo_t *handle);
 void __ufifo_log(const char *fmt, ...);
+
+/* ufifo_opts.c */
+void __ufifo_update_cached_min_out(ufifo_t *handle);
 
 #endif /* UFIFO_INTERNAL_H */

@@ -77,6 +77,7 @@ static void __ufifo_unregister(ufifo_t *handle)
         smp_store_release(&ctrl->users[handle->user_id].active, 0);
         __ufifo_ofd_unlock(handle->ctrl_fd, handle->user_id);
         ctrl->num_users--;
+        __ufifo_update_cached_min_out(handle);
     }
 }
 
@@ -182,6 +183,11 @@ static int __ufifo_init_from_shm(ufifo_t *handle)
     ret = __ufifo_acquire_eventfds(handle, 0);
     if (ret < 0)
         goto err_unregister;
+
+    if (__ufifo_is_shared(handle)) {
+        __ufifo_update_cached_min_out(handle);
+        __ufifo_efd_notify(handle->efd_wr, &handle->ctrl->tx_waiters, &handle->ctrl->epoll_tx_armed);
+    }
 
     return 0;
 
@@ -364,6 +370,7 @@ int ufifo_open(const char *name, const ufifo_init_t *init, ufifo_t **handle)
             snprintf(ctrl_name, sizeof(ctrl_name), "%s_ctrl", name);
             shm_unlink(name);
             shm_unlink(ctrl_name);
+            __ufifo_broker_wake_to_exit(name);
             fifo->shm_fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, (S_IRUSR | S_IWUSR));
         } else {
             fifo->shm_fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, (S_IRUSR | S_IWUSR));
@@ -440,6 +447,7 @@ static int __ufifo_close(ufifo_t *handle, int destroy)
         shm_unlink(handle->name);
         snprintf(ctrl_name, sizeof(ctrl_name), "%s_ctrl", handle->name);
         shm_unlink(ctrl_name);
+        __ufifo_broker_wake_to_exit(handle->name);
     }
     free(handle);
     return 0;
