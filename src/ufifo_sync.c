@@ -196,10 +196,14 @@ int __ufifo_efd_notify(int efd, int *waiters, int *epoll_armed)
 {
     int ret = 0;
     int w = smp_load_acquire(waiters);
-    int armed = atomic_xchg(epoll_armed, 0);
-    uint64_t post_count = (w > 0 ? w : 0) + armed;
-    if (post_count > 0) {
-        ret = write(efd, &post_count, sizeof(post_count));
+    int armed = smp_load_acquire(epoll_armed);
+    
+    if (w > 0 || armed > 0) {
+        armed = atomic_xchg(epoll_armed, 0);
+        uint64_t post_count = (w > 0 ? w : 0) + armed;
+        if (post_count > 0) {
+            ret = write(efd, &post_count, sizeof(post_count));
+        }
     }
     return ret < 0 ? -errno : 0;
 }

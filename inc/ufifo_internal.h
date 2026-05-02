@@ -71,7 +71,10 @@ void __ufifo_efd_close_all(ufifo_t *handle);
 
 /* ufifo_init.c */
 void __ufifo_reap_dead_user(ufifo_t *handle, unsigned int user_id);
-int __ufifo_is_shared(ufifo_t *handle);
+static inline int __ufifo_is_shared(ufifo_t *handle)
+{
+    return handle->ctrl->data_mode == UFIFO_DATA_SHARED;
+}
 void __ufifo_log(const char *fmt, ...);
 
 /* ufifo_opts.c */

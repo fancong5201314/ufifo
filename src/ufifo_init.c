@@ -17,10 +17,6 @@
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-int __ufifo_is_shared(ufifo_t *handle)
-{
-    return handle->ctrl->data_mode == UFIFO_DATA_SHARED;
-}
 
 void __ufifo_reap_dead_user(ufifo_t *handle, unsigned int user_id)
 {

@@ -193,7 +193,7 @@ static unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, l
             goto end;
         }
     }
-    if (handle->hook.recput) {
+    if (unlikely(handle->hook.recput)) {
         unsigned int in = READ_ONCE(handle->kfifo.in);
         len = *handle->kfifo.mask & in;
         len = handle->hook.recput(handle->shm_mem + len, *handle->kfifo.mask - len + 1, handle->shm_mem, buf);
@@ -270,7 +270,7 @@ static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, l
     }
 
     unsigned int old_out = READ_ONCE(handle->kfifo.out);
-    if (handle->hook.recget) {
+    if (unlikely(handle->hook.recget)) {
         unsigned int out = old_out;
         len = *handle->kfifo.mask & out;
         len = handle->hook.recget(handle->shm_mem + len, *handle->kfifo.mask - len + 1, handle->shm_mem, buf);
