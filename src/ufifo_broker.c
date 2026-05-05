@@ -179,7 +179,7 @@ static int __ufifo_broker_fork(ufifo_t *handle, int listener_fd)
         .fds_to_send = fds_to_send,
         .total_fds = total_fds,
     };
-    strncpy(ctx.shm_name, handle->name, sizeof(ctx.shm_name) - 1);
+    strncpy(ctx.shm_name, handle->name, sizeof(ctx.shm_name));
 
     pid_t pid = fork();
     if (pid < 0) {

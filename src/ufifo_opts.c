@@ -1,5 +1,6 @@
 #include "ufifo_internal.h"
 #include <errno.h>
+#include <stdbool.h>
 
 #include "utils.h"
 
@@ -48,15 +49,15 @@ unsigned int __ufifo_unused_len(ufifo_t *handle)
     }
 
     len = READ_ONCE(handle->kfifo.in) - out;
-    return *handle->kfifo.mask + 1 - len;
+    return handle->kfifo.mask + 1 - len;
 }
 
 static unsigned int __ufifo_peek_len(ufifo_t *handle, unsigned int offset, unsigned int in_val)
 {
     unsigned int len = in_val == offset ? 0 : 1;
     if (len && handle->hook.recsize) {
-        offset &= *handle->kfifo.mask;
-        len = handle->hook.recsize(handle->shm_mem + offset, *handle->kfifo.mask - offset + 1, handle->shm_mem);
+        offset &= handle->kfifo.mask;
+        len = handle->hook.recsize(handle->shm_mem + offset, handle->kfifo.mask - offset + 1, handle->shm_mem);
     }
     return len;
 }
@@ -66,8 +67,8 @@ static unsigned int __ufifo_peek_tag(ufifo_t *handle, unsigned int offset)
     unsigned int ret = 0;
 
     if (handle->hook.rectag) {
-        offset &= *handle->kfifo.mask;
-        ret = handle->hook.rectag(handle->shm_mem + offset, *handle->kfifo.mask - offset + 1, handle->shm_mem);
+        offset &= handle->kfifo.mask;
+        ret = handle->hook.rectag(handle->shm_mem + offset, handle->kfifo.mask - offset + 1, handle->shm_mem);
     }
 
     return ret;
@@ -76,7 +77,7 @@ static unsigned int __ufifo_peek_tag(ufifo_t *handle, unsigned int offset)
 unsigned int ufifo_size(ufifo_t *handle)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return *handle->kfifo.mask + 1;
+    return handle->kfifo.mask + 1;
 }
 
 void ufifo_reset(ufifo_t *handle)
@@ -167,7 +168,7 @@ static int __ufifo_try_reap_dead_readers(ufifo_t *handle)
     return cleaned;
 }
 
-static unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, long millisec)
+static inline __attribute__((always_inline)) unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, int wait_type, long millisec)
 {
     int ret;
     unsigned int len;
@@ -189,13 +190,12 @@ static unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, l
                 break;
         }
 
-        if (millisec == 0) {
+        if (wait_type == 0) {
             ret = -1;
-        } else if (millisec == -1) {
+        } else if (wait_type == 1) {
             ret = __ufifo_efd_wait(handle->efd_wr, handle, &handle->ctrl->tx_waiters);
         } else {
             ret = __ufifo_efd_timedwait(handle->efd_wr, handle, millisec, &handle->ctrl->tx_waiters);
-            millisec = 0;
         }
         if (ret) {
             len = 0;
@@ -204,8 +204,8 @@ static unsigned int __ufifo_put(ufifo_t *handle, void *buf, unsigned int size, l
     }
     if (unlikely(handle->hook.recput)) {
         unsigned int in = READ_ONCE(handle->kfifo.in);
-        len = *handle->kfifo.mask & in;
-        len = handle->hook.recput(handle->shm_mem + len, *handle->kfifo.mask - len + 1, handle->shm_mem, buf);
+        len = handle->kfifo.mask & in;
+        len = handle->hook.recput(handle->shm_mem + len, handle->kfifo.mask - len + 1, handle->shm_mem, buf);
         if (size != len) {
             len = 0;
             goto end;
@@ -239,22 +239,22 @@ end:
 unsigned int ufifo_put(ufifo_t *handle, void *buf, unsigned int size)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_put(handle, buf, size, 0);
+    return __ufifo_put(handle, buf, size, 0, 0);
 }
 
 unsigned int ufifo_put_block(ufifo_t *handle, void *buf, unsigned int size)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_put(handle, buf, size, -1);
+    return __ufifo_put(handle, buf, size, 1, 0);
 }
 
 unsigned int ufifo_put_timeout(ufifo_t *handle, void *buf, unsigned int size, long millisec)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_put(handle, buf, size, millisec);
+    return __ufifo_put(handle, buf, size, 2, millisec);
 }
 
-static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, long millisec)
+static inline __attribute__((always_inline)) unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, int wait_type, long millisec)
 {
     int ret;
     unsigned int len;
@@ -264,13 +264,12 @@ static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, l
     while (1) {
         len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out), READ_ONCE(handle->kfifo.in));
         if (len == 0) {
-            if (millisec == 0) {
+            if (wait_type == 0) {
                 ret = -1;
-            } else if (millisec == -1) {
+            } else if (wait_type == 1) {
                 ret = __ufifo_efd_wait(handle->efd_rd, handle, &handle->ctrl->users[user_id].rx_waiters);
             } else {
                 ret = __ufifo_efd_timedwait(handle->efd_rd, handle, millisec, &handle->ctrl->users[user_id].rx_waiters);
-                millisec = 0;
             }
             if (ret) {
                 goto end;
@@ -283,8 +282,8 @@ static unsigned int __ufifo_get(ufifo_t *handle, void *buf, unsigned int size, l
     unsigned int old_out = READ_ONCE(handle->kfifo.out);
     if (unlikely(handle->hook.recget)) {
         unsigned int out = old_out;
-        len = *handle->kfifo.mask & out;
-        len = handle->hook.recget(handle->shm_mem + len, *handle->kfifo.mask - len + 1, handle->shm_mem, buf);
+        len = handle->kfifo.mask & out;
+        len = handle->hook.recget(handle->shm_mem + len, handle->kfifo.mask - len + 1, handle->shm_mem, buf);
         smp_store_release(handle->kfifo.out, out + len);
     } else {
         size = handle->hook.recsize ? min(size, len) : size;
@@ -308,38 +307,36 @@ end:
 unsigned int ufifo_get(ufifo_t *handle, void *buf, unsigned int size)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_get(handle, buf, size, 0);
+    return __ufifo_get(handle, buf, size, 0, 0);
 }
 
 unsigned int ufifo_get_block(ufifo_t *handle, void *buf, unsigned int size)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_get(handle, buf, size, -1);
+    return __ufifo_get(handle, buf, size, 1, 0);
 }
 
 unsigned int ufifo_get_timeout(ufifo_t *handle, void *buf, unsigned int size, long millisec)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_get(handle, buf, size, millisec);
+    return __ufifo_get(handle, buf, size, 2, millisec);
 }
 
-static unsigned int __ufifo_peek(ufifo_t *handle, void *buf, unsigned int size, long millisec)
+static inline __attribute__((always_inline)) unsigned int __ufifo_peek(ufifo_t *handle, void *buf, unsigned int size, int wait_type, long millisec)
 {
-    int ret;
+    int ret = 0;
     unsigned int len;
     unsigned int user_id = __ufifo_is_shared(handle) ? handle->user_id : 0;
-
     __ufifo_data_lock(handle);
     while (1) {
         len = __ufifo_peek_len(handle, READ_ONCE(handle->kfifo.out), READ_ONCE(handle->kfifo.in));
         if (len == 0) {
-            if (millisec == 0) {
+            if (wait_type == 0) {
                 ret = -1;
-            } else if (millisec == -1) {
+            } else if (wait_type == 1) {
                 ret = __ufifo_efd_wait(handle->efd_rd, handle, &handle->ctrl->users[user_id].rx_waiters);
             } else {
                 ret = __ufifo_efd_timedwait(handle->efd_rd, handle, millisec, &handle->ctrl->users[user_id].rx_waiters);
-                millisec = 0;
             }
             if (ret) {
                 goto end;
@@ -348,39 +345,36 @@ static unsigned int __ufifo_peek(ufifo_t *handle, void *buf, unsigned int size, 
             break;
         }
     }
-
     if (unlikely(handle->hook.recget)) {
         unsigned int out = READ_ONCE(handle->kfifo.out);
-        len = *handle->kfifo.mask & out;
-        len = handle->hook.recget(handle->shm_mem + len, *handle->kfifo.mask - len + 1, handle->shm_mem, buf);
+        len = handle->kfifo.mask & out;
+        len = handle->hook.recget(handle->shm_mem + len, handle->kfifo.mask - len + 1, handle->shm_mem, buf);
     } else {
         size = handle->hook.recsize ? min(size, len) : size;
         len = kfifo_out_peek(&handle->kfifo, handle->shm_mem, buf, size);
     }
-
     __ufifo_efd_notify(handle->efd_wr, &handle->ctrl->tx_waiters, &handle->ctrl->epoll_tx_armed);
 end:
     __ufifo_data_unlock(handle);
-
     return len;
 }
 
 unsigned int ufifo_peek(ufifo_t *handle, void *buf, unsigned int size)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_peek(handle, buf, size, 0);
+    return __ufifo_peek(handle, buf, size, 0, 0);
 }
 
 unsigned int ufifo_peek_block(ufifo_t *handle, void *buf, unsigned int size)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_peek(handle, buf, size, -1);
+    return __ufifo_peek(handle, buf, size, 1, 0);
 }
 
 unsigned int ufifo_peek_timeout(ufifo_t *handle, void *buf, unsigned int size, long millisec)
 {
     UFIFO_CHECK_HANDLE(handle, 0);
-    return __ufifo_peek(handle, buf, size, millisec);
+    return __ufifo_peek(handle, buf, size, 2, millisec);
 }
 
 int ufifo_oldest(ufifo_t *handle, unsigned int tag)

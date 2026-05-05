@@ -22,7 +22,7 @@ void __ufifo_reap_dead_user(ufifo_t *handle, unsigned int user_id)
     ufifo_ctrl_t *ctrl = handle->ctrl;
 
     if (READ_ONCE(&ctrl->users[user_id].active)) {
-        WRITE_ONCE(&ctrl->users[user_id].active, 0);
+        smp_store_release(&ctrl->users[user_id].active, 0);
         ctrl->num_users--;
     }
 }
@@ -169,7 +169,7 @@ static int __ufifo_init_from_shm(ufifo_t *handle)
     handle->lock_type = handle->ctrl->lock;
 
     handle->kfifo.in = &handle->ctrl->in;
-    handle->kfifo.mask = &handle->ctrl->mask;
+    handle->kfifo.mask = handle->ctrl->mask;
     if (__ufifo_is_shared(handle)) {
         WRITE_ONCE(&handle->ctrl->users[handle->user_id].out, READ_ONCE(&handle->ctrl->in));
         handle->kfifo.out = &handle->ctrl->users[handle->user_id].out;
@@ -273,10 +273,10 @@ static int __ufifo_init_from_user(ufifo_t *handle, ufifo_alloc_t *alloc)
 
     handle->kfifo.in = &handle->ctrl->in;
     handle->kfifo.out = &handle->ctrl->users[handle->user_id].out;
-    handle->kfifo.mask = &handle->ctrl->mask;
     ret = kfifo_init(&handle->kfifo, handle->shm_size);
     if (ret < 0)
         goto err_register;
+    handle->ctrl->mask = handle->kfifo.mask;
 
     /* Acquire eventfds via broker (create + fork broker) */
     ret = __ufifo_acquire_eventfds(handle, 1);

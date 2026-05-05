@@ -27,12 +27,13 @@ if(NOT CMAKE_CROSSCOMPILING OR CMAKE_CROSSCOMPILING_EMULATOR)
     gtest_discover_tests(ufifo_test)
 endif()
 
-# Performance benchmark executable (compiled with -Os for realistic measurement)
+# Performance benchmark executable (compiled with -O3 for realistic measurement)
 add_executable(ufifo_bench test/ufifo_bench.cpp)
 target_link_libraries(ufifo_bench PRIVATE
-    ufifo_static
+    ufifo_shared
     ${RT_LIBRARY}
     ${PTHREAD_LIBRARY}
 )
 target_include_directories(ufifo_bench PRIVATE ${CMAKE_SOURCE_DIR}/inc)
-target_compile_options(ufifo_bench PRIVATE -g -Os -Wall -Werror)
+target_compile_options(ufifo_bench PRIVATE -g -O3 -flto -Wall -Werror)
+target_link_options(ufifo_bench PRIVATE -flto)

@@ -41,7 +41,7 @@ void ufifo_dump(ufifo_t *handle)
     UFIFO_CHECK_HANDLE(handle);
     __ufifo_ctrl_lock(handle);
 
-    unsigned int mask = *handle->kfifo.mask;
+    unsigned int mask = handle->kfifo.mask;
     unsigned int size = mask + 1;
     unsigned int in = READ_ONCE(handle->kfifo.in);
     unsigned int out = READ_ONCE(handle->kfifo.out);

@@ -35,7 +35,6 @@ find_library(PTHREAD_LIBRARY pthread)
 
 # Library source files
 set(LIB_SOURCES
-    src/kfifo.c
     src/ufifo_opts.c
     src/ufifo_sync.c
     src/ufifo_epoll.c
@@ -51,7 +50,7 @@ set_target_properties(ufifo_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(ufifo_static PUBLIC inc)
-target_compile_options(ufifo_static PRIVATE -g -Os -Wall -Werror)
+target_compile_options(ufifo_static PRIVATE -g -O3 -Wall -Werror)
 if(COVERAGE)
     ufifo_enable_coverage(ufifo_static)
 endif()
@@ -65,7 +64,7 @@ set_target_properties(ufifo_shared PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(ufifo_shared PUBLIC inc)
-target_compile_options(ufifo_shared PRIVATE -g -Os -Wall -Werror -fvisibility=hidden)
+target_compile_options(ufifo_shared PRIVATE -g -O3 -flto -Wall -Werror -fvisibility=hidden)
 if(COVERAGE)
     ufifo_enable_coverage(ufifo_shared)
 endif()
@@ -83,7 +82,7 @@ set(EXAMPLES
 
 foreach(example ${EXAMPLES})
     add_executable(${example} example/${example}.c)
-    target_compile_options(${example} PRIVATE -g -Os -Wall -Werror)
+    target_compile_options(${example} PRIVATE -g -O3 -Wall -Werror)
     target_link_libraries(${example} PRIVATE ufifo_static ${RT_LIBRARY} ${PTHREAD_LIBRARY})
 endforeach()
 
