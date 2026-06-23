@@ -36,5 +36,6 @@
 #define atomic_cmpxchg(ptr, exp, des)   __atomic_compare_exchange_n((ptr), (exp), (des), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
 #define READ_ONCE(p)                    __atomic_load_n((p), __ATOMIC_RELAXED)
 #define WRITE_ONCE(p, v)                __atomic_store_n((p), (v), __ATOMIC_RELAXED)
+#define smp_mb()                        __atomic_thread_fence(__ATOMIC_SEQ_CST)
 
 #endif /* _UTILS_H_ */
